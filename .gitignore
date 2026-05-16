@@ -1,0 +1,9 @@
+data/
+*.pdf
+*.png
+*.tex
+git-ref/
+lib/
+convert_to_flat.py
+__pycache__/
+*.pyc
