@@ -93,7 +93,7 @@ Applied with numpy before any RooFit call:
 | `rec_dimu_px/py/pz` | Dimuon 3-momentum [GeV] |
 | `rec_dimu_y/eta` | Dimuon rapidity / pseudorapidity |
 | `rec_dimu_mT` | Dimuon transverse mass √(M²+pT²) [GeV] |
-| `rec_mu_theta_pos/neg` | Muon polar angle at vertex [rad] |
+| `rec_mu_theta_pos/neg` | Muon horizontal bending angle arctan(px/pz) at vertex [rad] |
 | `rec_mu_open_angle` | Opening angle between the two muons [rad] |
 | `rec_mu_dpt` | pT(μ⁺) − pT(μ⁻) [GeV] |
 | `rec_mu_deltaR` | ΔR(μ⁺, μ⁻) in (η, φ) |
