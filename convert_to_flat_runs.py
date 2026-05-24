@@ -3,275 +3,278 @@
 convert_to_flat_runs.py
   Multi-run/spill reco data → flat_runs_{up,down}.root
 
+  Pure uproot + awkward implementation — no ROOT or TreeDataDict.so needed.
+  Branch-reading logic mirrors convert_to_flat_uproot.py exactly.
+
   Data layout on cluster:
     RECO_DIR/run_XXXXXX/spill_YYYYYYYYY/out/output_PM.root
 
   Spin assignment (reco-20260512):
-    UP  : runs 6111-6118, 6156
-    DOWN: runs 6135-6139, 6149-6155
+    UP  : runs 6111–6118, 6156
+    DOWN: runs 6135–6139, 6149–6155
 
-  Applies exactly the same cuts as convert_to_flat.py:
+  Cuts applied (same as convert_to_flat_uproot.py / AnaDimuon.cc):
     1. FPGA bit-0 (MATRIX1) trigger
     2. Both track vertex z > -600 cm
     3. |y_st1| > 3 cm for both tracks at station 1
-    4. chi2_tgt > 0, chi2_dump - chi2_tgt > 0, chi2_ups - chi2_tgt > 0 (pos & neg)
-    5. Dimuon invariant mass: 0.1 ≤ M ≤ 10.0 GeV
+    4. chi2_tgt > 0, chi2_dump − chi2_tgt > 0, chi2_ups − chi2_tgt > 0 (pos & neg)
+    5. Dimuon invariant mass: 0.5 ≤ M ≤ 10.0 GeV
 
   Output (written to --outdir, default ./data/):
     flat_runs_up.root
     flat_runs_down.root
 
-Usage (on cluster, inside the root_env conda environment):
-    conda run -n root_env python3 convert_to_flat_runs.py
-    conda run -n root_env python3 convert_to_flat_runs.py --outdir /path/to/output
-    conda run -n root_env python3 convert_to_flat_runs.py --spin up   # only spin-up
-    conda run -n root_env python3 convert_to_flat_runs.py --spin down # only spin-down
+Usage (on cluster — only needs python3 + uproot + awkward + numpy):
+    python3 convert_to_flat_runs.py
+    python3 convert_to_flat_runs.py --outdir /path/to/output
+    python3 convert_to_flat_runs.py --spin up        # only spin-up
+    python3 convert_to_flat_runs.py --spin down      # only spin-down
+    python3 convert_to_flat_runs.py --reco-dir /other/reco/dir
 
-Then copy the output files back to your analysis machine:
-    scp spinquestgpvm01:path/to/flat_runs_*.root data/
+Then copy back to your analysis machine:
+    scp spinquestgpvm01:~/ana-spinquest-fit/data/flat_runs_*.root data/
 """
 
 import argparse
 import glob
-import math
 import os
 
+import awkward as ak
 import numpy as np
 import uproot
-import ROOT
 
-# ── Paths ─────────────────────────────────────────────────────────────────────
-LIB_SO   = os.path.join(os.path.dirname(__file__), "lib", "TreeDataDict.so")
+# ── Default paths ──────────────────────────────────────────────────────────────
 RECO_DIR = "/pnfs/e1039/persistent/users/kenichi/RecoData2024/reco-20260512"
-
-ROOT.gROOT.SetBatch(True)
-ROOT.gSystem.Load(LIB_SO)
 
 # ── Spin assignment ────────────────────────────────────────────────────────────
 SPIN_UP_RUNS   = {6111, 6112, 6113, 6114, 6115, 6116, 6117, 6118, 6156}
 SPIN_DOWN_RUNS = {6135, 6136, 6137, 6138, 6139,
                   6149, 6150, 6151, 6152, 6153, 6154, 6155}
 
-# ── Cut thresholds (match convert_to_flat.py) ─────────────────────────────────
-MASS_MIN, MASS_MAX = 0.1, 10.0
+# ── Cut thresholds ─────────────────────────────────────────────────────────────
+M_MIN, M_MAX = 0.5, 10.0
+
+# ── Branches to read (same keys as convert_to_flat_uproot.py) ─────────────────
+_BRANCHES = [
+    "event/fpga_bits",
+    "dimuon_list.mom_target",
+    "dimuon_list.mom_pos",
+    "dimuon_list.mom_neg",
+    "dimuon_list.pos_pos",
+    "dimuon_list.pos_neg",
+    "dimuon_list.pos_pos_st1",
+    "dimuon_list.pos_neg_st1",
+    "dimuon_list.mom_pos_st1",
+    "dimuon_list.mom_neg_st1",
+    "dimuon_list.chisq_target_pos",
+    "dimuon_list.chisq_dump_pos",
+    "dimuon_list.chisq_upstream_pos",
+    "dimuon_list.chisq_target_neg",
+    "dimuon_list.chisq_dump_neg",
+    "dimuon_list.chisq_upstream_neg",
+]
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Kinematic helpers (identical to convert_to_flat_uproot.py) ─────────────────
 
-def get_spill_files(spin: str) -> list[str]:
-    """Return sorted list of output_PM.root paths for the given spin."""
+def flat(jagged):
+    return ak.to_numpy(ak.flatten(jagged))
+
+
+def flat_lv(lv):
+    """Unpack a TLorentzVector branch → (px, py, pz, E) numpy arrays."""
+    return (
+        flat(lv["fP"]["fX"]),
+        flat(lv["fP"]["fY"]),
+        flat(lv["fP"]["fZ"]),
+        flat(lv["fE"]),
+    )
+
+
+def flat_v3(v3):
+    """Unpack a TVector3 branch → (x, y, z) numpy arrays."""
+    return flat(v3["fX"]), flat(v3["fY"]), flat(v3["fZ"])
+
+
+def broadcast_event_to_dimuons(event_val, dimuon_jagged):
+    """Repeat a per-event scalar to match the flat (per-dimuon) array length."""
+    n_per_event = ak.to_numpy(ak.num(dimuon_jagged))
+    return np.repeat(ak.to_numpy(event_val), n_per_event)
+
+
+def pseudorapidity(px, py, pz):
+    p = np.sqrt(px**2 + py**2 + pz**2)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.where(p - pz > 0, 0.5 * np.log((p + pz) / (p - pz)), 0.0)
+
+
+def rapidity(E, pz):
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.where(E - pz > 0, 0.5 * np.log((E + pz) / (E - pz)), 0.0)
+
+
+# ── File discovery ─────────────────────────────────────────────────────────────
+
+def get_spill_files(spin: str, reco_dir: str) -> list:
+    """Return sorted list of output_PM.root paths for the given spin state."""
     run_nums = SPIN_UP_RUNS if spin == "up" else SPIN_DOWN_RUNS
     files = []
     for run_num in sorted(run_nums):
-        run_dir = os.path.join(RECO_DIR, f"run_{run_num:06d}")
+        run_dir = os.path.join(reco_dir, f"run_{run_num:06d}")
         pattern = os.path.join(run_dir, "spill_*", "out", "output_PM.root")
         matched = sorted(glob.glob(pattern))
         n = len(matched)
         if n == 0:
-            print(f"  WARNING: run {run_num:06d} — no spill files found at {pattern}")
+            print(f"  WARNING: run {run_num:06d} — no spill files found")
+            print(f"           (looked for: {pattern})")
         else:
             print(f"  run {run_num:06d}: {n:3d} spill files")
         files.extend(matched)
     return files
 
 
-def _empty_cols() -> dict:
-    return {
-        "rec_dimu_y":           [],
-        "rec_dimu_eta":         [],
-        "rec_dimu_E":           [],
-        "rec_dimu_px":          [],
-        "rec_dimu_py":          [],
-        "rec_dimu_pz":          [],
-        "rec_dimu_M":           [],
-        "rec_dimu_mT":          [],
-        "rec_mu_theta_pos":     [],
-        "rec_mu_theta_neg":     [],
-        "rec_mu_open_angle":    [],
-        "rec_mu_dpt":           [],
-        "rec_mu_Epos":          [],
-        "rec_mu_Eneg":          [],
-        "rec_track_pos_x_st1":  [],
-        "rec_track_neg_x_st1":  [],
-        "rec_track_pos_px_st1": [],
-        "rec_track_neg_px_st1": [],
-        "rec_track_pos_py_st1": [],
-        "rec_track_neg_py_st1": [],
-        "rec_dz_vtx":           [],
-        "rec_mu_deltaR":        [],
-    }
+# ── Per-spin processing ────────────────────────────────────────────────────────
 
-
-def _process_one_spill(input_path: str, cols: dict, ctrs: dict) -> None:
+def process_spin(spin: str, output_path: str, reco_dir: str) -> None:
     """
-    Open one spill file and accumulate passing dimuon candidates into cols.
-    Mirrors the event loop in convert_to_flat.py exactly.
+    Read all spill files for one spin state, apply cuts, write flat tree.
+    Uses uproot.concatenate to load all files in one vectorised pass.
     """
-    fin = ROOT.TFile.Open(input_path, "READ")
-    if not fin or fin.IsZombie():
-        print(f"  WARNING: cannot open {input_path!r} — skipping")
-        return
-    tree = fin.Get("tree")
-    if not tree:
-        fin.Close()
-        print(f"  WARNING: no 'tree' object in {input_path!r} — skipping")
-        return
-
-    n_entries = int(tree.GetEntries())
-
-    for i_ev in range(n_entries):
-        tree.GetEntry(i_ev)
-        ev    = tree.event
-        dlist = tree.dimuon_list
-        nd = dlist.size()
-        if nd == 0:
-            continue
-        ctrs["raw"] += nd
-
-        # 1. FPGA bit-0 (MATRIX1) — event-level
-        if not (ev.fpga_bits & 1):
-            continue
-        ctrs["fpga"] += nd
-
-        for j in range(nd):
-            dd = dlist[j]
-
-            # 2. Both track vertex z > -600 cm
-            z_vp = dd.pos_pos.Z()
-            z_vn = dd.pos_neg.Z()
-            if z_vp <= -600.0 or z_vn <= -600.0:
-                continue
-            ctrs["zcut"] += 1
-
-            # 3. |y_st1| > 3 cm for both tracks
-            if abs(dd.pos_pos_st1.Y()) <= 3.0 or abs(dd.pos_neg_st1.Y()) <= 3.0:
-                continue
-            ctrs["yst1"] += 1
-
-            # 4. Chi-squared origin cuts (target is best vertex)
-            tp = dd.chisq_target_pos;  dp = dd.chisq_dump_pos;  up_ = dd.chisq_upstream_pos
-            tn = dd.chisq_target_neg;  dn = dd.chisq_dump_neg;  un  = dd.chisq_upstream_neg
-            if tp <= 0 or (dp - tp) <= 0 or (up_ - tp) <= 0:
-                continue
-            if tn <= 0 or (dn - tn) <= 0 or (un  - tn) <= 0:
-                continue
-            ctrs["chi2"] += 1
-
-            # 5. Invariant mass
-            dimu = dd.mom_target          # TLorentzVector
-            M    = dimu.M()
-            if M < MASS_MIN or M > MASS_MAX:
-                continue
-            ctrs["mass"] += 1
-
-            # ── Derived kinematics (same as convert_to_flat.py) ──────────────
-            mu_p = dd.mom_pos
-            mu_n = dd.mom_neg
-
-            cols["rec_dimu_y"].append(dimu.Rapidity())
-            cols["rec_dimu_eta"].append(dimu.Eta())
-            cols["rec_dimu_E"].append(dimu.E())
-            cols["rec_dimu_px"].append(dimu.Px())
-            cols["rec_dimu_py"].append(dimu.Py())
-            cols["rec_dimu_pz"].append(dimu.Pz())
-            cols["rec_dimu_M"].append(M)
-            cols["rec_dimu_mT"].append(dimu.Mt())
-
-            cols["rec_mu_theta_pos"].append(math.atan2(mu_p.Pt(), mu_p.Pz()))
-            cols["rec_mu_theta_neg"].append(math.atan2(mu_n.Pt(), mu_n.Pz()))
-            cols["rec_mu_Epos"].append(mu_p.E())
-            cols["rec_mu_Eneg"].append(mu_n.E())
-            cols["rec_mu_dpt"].append(mu_p.Pt() - mu_n.Pt())
-
-            vp    = mu_p.Vect()
-            vn    = mu_n.Vect()
-            denom = vp.Mag() * vn.Mag()
-            cos_a = vp.Dot(vn) / denom if denom > 0 else 1.0
-            cols["rec_mu_open_angle"].append(math.acos(max(-1.0, min(1.0, cos_a))))
-
-            dphi = mu_p.Phi() - mu_n.Phi()
-            dphi = dphi - 2.0 * math.pi * round(dphi / (2.0 * math.pi))
-            deta = mu_p.Eta() - mu_n.Eta()
-            cols["rec_mu_deltaR"].append(math.sqrt(deta * deta + dphi * dphi))
-
-            cols["rec_track_pos_x_st1"].append(dd.pos_pos_st1.X())
-            cols["rec_track_neg_x_st1"].append(dd.pos_neg_st1.X())
-            cols["rec_track_pos_px_st1"].append(dd.mom_pos_st1.Px())
-            cols["rec_track_neg_px_st1"].append(dd.mom_neg_st1.Px())
-            cols["rec_track_pos_py_st1"].append(dd.mom_pos_st1.Py())
-            cols["rec_track_neg_py_st1"].append(dd.mom_neg_st1.Py())
-            cols["rec_dz_vtx"].append(z_vp - z_vn)
-
-    fin.Close()
-
-
-def process_spin(spin: str, output_path: str) -> None:
-    """Collect all spill files for one spin state, apply cuts, write flat tree."""
     print(f"\n── Collecting spin-{spin} spill files ────────────────────────")
-    files = get_spill_files(spin)
+    files = get_spill_files(spin, reco_dir)
     if not files:
         raise RuntimeError(
-            f"No spill files found for spin={spin!r} under {RECO_DIR!r}")
+            f"No spill files found for spin={spin!r} under {reco_dir!r}")
     print(f"  Total: {len(files)} spill files")
 
-    cols = _empty_cols()
-    ctrs = {"raw": 0, "fpga": 0, "zcut": 0, "yst1": 0, "chi2": 0, "mass": 0}
+    # Build the list of "path:treename" sources for concatenate
+    sources = [f"{p}:tree" for p in files]
 
-    print(f"\n── Processing spills ─────────────────────────────────────────")
-    n = len(files)
-    for i, fpath in enumerate(files, 1):
-        if i == 1 or i % 100 == 0 or i == n:
-            # show run/spill in progress indicator
-            parts = fpath.split(os.sep)
-            label = "/".join(parts[-4:-1])  # run_XXXXXX/spill_YYY/out
-            print(f"  [{i:4d}/{n}] {label}")
-        _process_one_spill(fpath, cols, ctrs)
+    print(f"\n── Reading & concatenating {len(files)} files … (may take a while)")
+    arrays = uproot.concatenate(sources, expressions=_BRANCHES, library="ak")
 
-    print(f"\n── Cut-flow for spin-{spin} ───────────────────────────────────")
-    print(f"  Dimuon candidates (raw):             {ctrs['raw']:,}")
-    print(f"  After FPGA trigger:                  {ctrs['fpga']:,}")
-    print(f"  After Z_vertex > -600 cm:            {ctrs['zcut']:,}")
-    print(f"  After |y_st1| > 3 cm:               {ctrs['yst1']:,}")
-    print(f"  After chi2 cuts:                     {ctrs['chi2']:,}")
-    print(f"  After mass [{MASS_MIN}, {MASS_MAX}] GeV: {ctrs['mass']:,}")
+    # ── Broadcast FPGA bits (event-level) to per-dimuon ───────────────────
+    fpga = broadcast_event_to_dimuons(
+        arrays["event/fpga_bits"], arrays["dimuon_list.mom_target"])
+
+    # ── Flatten all dimuon-level vector branches ───────────────────────────
+    px_d, py_d, pz_d, E_d = flat_lv(arrays["dimuon_list.mom_target"])
+    px_p, py_p, pz_p, E_p = flat_lv(arrays["dimuon_list.mom_pos"])
+    px_n, py_n, pz_n, E_n = flat_lv(arrays["dimuon_list.mom_neg"])
+    _,    _,    z_vp       = flat_v3(arrays["dimuon_list.pos_pos"])
+    _,    _,    z_vn       = flat_v3(arrays["dimuon_list.pos_neg"])
+    x_st1_p, y_st1_p, _   = flat_v3(arrays["dimuon_list.pos_pos_st1"])
+    x_st1_n, y_st1_n, _   = flat_v3(arrays["dimuon_list.pos_neg_st1"])
+    px_st1_p, py_st1_p, _, _ = flat_lv(arrays["dimuon_list.mom_pos_st1"])
+    px_st1_n, py_st1_n, _, _ = flat_lv(arrays["dimuon_list.mom_neg_st1"])
+
+    chi2_tgt_p = flat(arrays["dimuon_list.chisq_target_pos"])
+    chi2_dum_p = flat(arrays["dimuon_list.chisq_dump_pos"])
+    chi2_ups_p = flat(arrays["dimuon_list.chisq_upstream_pos"])
+    chi2_tgt_n = flat(arrays["dimuon_list.chisq_target_neg"])
+    chi2_dum_n = flat(arrays["dimuon_list.chisq_dump_neg"])
+    chi2_ups_n = flat(arrays["dimuon_list.chisq_upstream_neg"])
+
+    n_raw = len(E_d)
+    print(f"  Dimuon candidates (raw):             {n_raw:,}")
+
+    # ── Cuts ──────────────────────────────────────────────────────────────
+    cut_fpga  = (fpga & 0x1) != 0
+    cut_z     = (z_vp > -600.0) & (z_vn > -600.0)
+    cut_y_st1 = (np.abs(y_st1_p) > 3.0) & (np.abs(y_st1_n) > 3.0)
+    cut_chi2_p = (chi2_tgt_p > 0) & (chi2_dum_p - chi2_tgt_p > 0) & (chi2_ups_p - chi2_tgt_p > 0)
+    cut_chi2_n = (chi2_tgt_n > 0) & (chi2_dum_n - chi2_tgt_n > 0) & (chi2_ups_n - chi2_tgt_n > 0)
+
+    M    = np.sqrt(np.maximum(E_d**2 - (px_d**2 + py_d**2 + pz_d**2), 0.0))
+    cut_mass = (M >= M_MIN) & (M <= M_MAX)
+
+    cut_all = cut_fpga & cut_z & cut_y_st1 & cut_chi2_p & cut_chi2_n
+    sel     = cut_all & cut_mass
+
+    print(f"  After FPGA trigger:                  {int(cut_fpga.sum()):,}")
+    print(f"  After Z_vertex > -600 cm:            {int((cut_fpga & cut_z).sum()):,}")
+    print(f"  After |y_st1| > 3 cm:               {int((cut_fpga & cut_z & cut_y_st1).sum()):,}")
+    print(f"  After chi2 cuts:                     {int(cut_all.sum()):,}")
+    print(f"  After mass [{M_MIN}, {M_MAX}] GeV:   {int(sel.sum()):,}")
+
+    # ── Derived kinematics ─────────────────────────────────────────────────
+    pT_d = np.sqrt(px_d**2 + py_d**2)
+    pT_p = np.sqrt(px_p**2 + py_p**2)
+    pT_n = np.sqrt(px_n**2 + py_n**2)
+
+    p3_p = np.sqrt(px_p**2 + py_p**2 + pz_p**2)
+    p3_n = np.sqrt(px_n**2 + py_n**2 + pz_n**2)
+    cos_alpha = (px_p*px_n + py_p*py_n + pz_p*pz_n) / (p3_p * p3_n + 1e-30)
+
+    phi_p = np.arctan2(py_p, px_p)
+    phi_n = np.arctan2(py_n, px_n)
+    dphi  = phi_p - phi_n
+    dphi  = dphi - 2 * np.pi * np.round(dphi / (2 * np.pi))
+    eta_p = pseudorapidity(px_p, py_p, pz_p)
+    eta_n = pseudorapidity(px_n, py_n, pz_n)
+
+    # ── Write output ──────────────────────────────────────────────────────
+    out = {
+        "rec_dimu_y":           rapidity(E_d, pz_d)[sel],
+        "rec_dimu_eta":         pseudorapidity(px_d, py_d, pz_d)[sel],
+        "rec_dimu_E":           E_d[sel],
+        "rec_dimu_px":          px_d[sel],
+        "rec_dimu_py":          py_d[sel],
+        "rec_dimu_pz":          pz_d[sel],
+        "rec_dimu_M":           M[sel],
+        "rec_dimu_mT":          np.sqrt(M**2 + pT_d**2)[sel],
+        "rec_mu_theta_pos":     np.arctan(px_p / pz_p)[sel],
+        "rec_mu_theta_neg":     np.arctan(px_n / pz_n)[sel],
+        "rec_mu_open_angle":    np.arccos(np.clip(cos_alpha, -1.0, 1.0))[sel],
+        "rec_mu_dpt":           (pT_p - pT_n)[sel],
+        "rec_mu_Epos":          E_p[sel],
+        "rec_mu_Eneg":          E_n[sel],
+        "rec_track_pos_x_st1":  x_st1_p[sel],
+        "rec_track_neg_x_st1":  x_st1_n[sel],
+        "rec_track_pos_px_st1": px_st1_p[sel],
+        "rec_track_neg_px_st1": px_st1_n[sel],
+        "rec_track_pos_py_st1": py_st1_p[sel],
+        "rec_track_neg_py_st1": py_st1_n[sel],
+        "rec_dz_vtx":           (z_vp - z_vn)[sel],
+        "rec_mu_deltaR":        np.sqrt((eta_p - eta_n)**2 + dphi**2)[sel],
+    }
 
     out_dir = os.path.dirname(output_path)
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
 
     with uproot.recreate(output_path) as fout:
-        fout["tree"] = {k: np.array(v, dtype=np.float64) for k, v in cols.items()}
-    print(f"  Written → {output_path}")
+        fout["tree"] = {k: v.astype(np.float64) for k, v in out.items()}
+    print(f"  Written → {output_path}  ({int(sel.sum()):,} events)")
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Flatten multi-run/spill reco data into flat ROOT trees.")
+        description="Flatten multi-run/spill reco data → flat ROOT trees (uproot-only).")
     parser.add_argument(
-        "--outdir", default=os.path.join(os.path.dirname(__file__), "data"),
-        help="Directory to write flat_runs_{up,down}.root (default: ./data/)")
+        "--outdir",
+        default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"),
+        help="Output directory for flat_runs_{up,down}.root  (default: ./data/)")
     parser.add_argument(
         "--spin", choices=["up", "down", "both"], default="both",
-        help="Which spin state to process (default: both)")
+        help="Which spin state to process  (default: both)")
     parser.add_argument(
         "--reco-dir", default=RECO_DIR,
-        help=f"Path to reco-YYYYMMDD directory (default: {RECO_DIR})")
+        help=f"Path to reco-YYYYMMDD directory  (default: {RECO_DIR})")
     args = parser.parse_args()
 
-    # allow override of RECO_DIR at runtime
-    global RECO_DIR
-    RECO_DIR = args.reco_dir
+    reco_dir = args.reco_dir   # plain local variable — no global mutation needed
+    spins    = ["up", "down"] if args.spin == "both" else [args.spin]
 
-    spins = ["up", "down"] if args.spin == "both" else [args.spin]
     for spin in spins:
         out = os.path.join(args.outdir, f"flat_runs_{spin}.root")
-        process_spin(spin, out)
+        process_spin(spin, out, reco_dir)
 
     print("\nDone.")
     if len(spins) == 2:
-        print("\nNext steps:")
+        print("\nNext steps — copy flat files to your analysis machine:")
         print(f"  scp spinquestgpvm01:{args.outdir}/flat_runs_up.root   data/")
         print(f"  scp spinquestgpvm01:{args.outdir}/flat_runs_down.root data/")
 
