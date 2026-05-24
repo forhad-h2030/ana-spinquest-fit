@@ -292,5 +292,5 @@ def fit_and_save(mass_arrays, output_path):
     canvas.SaveAs(output_path)
     print(f"\nSaved → {output_path}")
 
-    hist_path = output_path.replace(".pdf", "_hist.pdf")
+    hist_path = output_path.replace(".png", "_hist.png")
     draw_histograms(mass_arrays, hist_path)
