@@ -43,6 +43,10 @@ _PATHS = {
         "up":   os.path.join(_HERE, "data", "flat_runs_up.root"),
         "down": os.path.join(_HERE, "data", "flat_runs_down.root"),
     },
+    "runs_rm": {
+        "up":   os.path.join(_HERE, "data", "flat_runs_up_rm.root"),
+        "down": os.path.join(_HERE, "data", "flat_runs_down_rm.root"),
+    },
 }
 
 # ── Spin assignment metadata (for reference / documentation) ──────────────────
@@ -69,7 +73,7 @@ def load_spin_data(mode: str, branches: list) -> dict:
     """
     if mode not in _PATHS:
         raise ValueError(
-            f"Unknown data mode {mode!r}. Choose 'flat' or 'runs'.")
+            f"Unknown data mode {mode!r}. Choose 'flat', 'runs', or 'runs_rm'.")
 
     raw = {}
     for spin in ("up", "down"):
@@ -93,18 +97,21 @@ def output_path(base: str, mode: str) -> str:
     """
     Derive an output file path that encodes the data mode.
 
-    "flat" → base unchanged  (e.g. fit_mode_final.png)
-    "runs" → _runs inserted  (e.g. fit_mode_final_runs.png)
+    "flat"    → base unchanged          (e.g. fit_mode_final.png)
+    "runs"    → _runs inserted          (e.g. fit_mode_final_runs.png)
+    "runs_rm" → _runs_rm inserted       (e.g. fit_mode_final_runs_rm.png)
     """
     if mode == "flat":
         return base
     root, ext = os.path.splitext(base)
-    return f"{root}_runs{ext}"
+    suffix = "_runs_rm" if mode == "runs_rm" else "_runs"
+    return f"{root}{suffix}{ext}"
 
 
 def add_data_arg(parser) -> None:
     """Add --data argument to an argparse.ArgumentParser."""
     parser.add_argument(
-        "--data", choices=["flat", "runs"], default="flat",
+        "--data", choices=["flat", "runs", "runs_rm"], default="flat",
         help="Data source: 'flat' = single flat files (default); "
-             "'runs' = multi-run reco data (needs flat_runs_*.root)")
+             "'runs' = multi-run reco data; "
+             "'runs_rm' = multi-run with road-matching cut")
