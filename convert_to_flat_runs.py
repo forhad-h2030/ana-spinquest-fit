@@ -190,12 +190,20 @@ def process_spin(spin: str, output_path: str, reco_dir: str,
     neg_top = flat(arrays["dimuon_list.neg_top"]).astype(bool)
     neg_bot = flat(arrays["dimuon_list.neg_bot"]).astype(bool)
 
+    # FPGA trigger bits — event-level branch, broadcast to per-dimuon
+    fpga_ev  = ak.to_numpy(ak.flatten(arrays["fpga_bits"], axis=None))
+    n_dimu   = ak.to_numpy(ak.num(arrays["dimuon_list.mom_target"], axis=1))
+    fpga     = np.repeat(fpga_ev, n_dimu)
+
     n_raw = len(E_d)
     print(f"  Dimuon candidates (raw):             {n_raw:,}")
 
     # ── Cuts — Cut #1 (DocDB #11359 / Liliet) ─────────────────────────────
     # Road matching: optional (--road-matching flag)
     cut_road  = (pos_top & neg_bot) | (pos_bot & neg_top)
+
+    # 0. FPGA bit-0 (MATRIX1) trigger
+    cut_fpga  = (fpga & 0x1) != 0
 
     # 1. z_track > -600 cm  (both individual track vertices)
     cut_z_trk = (z_vp > -600.0) & (z_vn > -600.0)
@@ -218,7 +226,7 @@ def process_spin(spin: str, output_path: str, reco_dir: str,
     cut_mass = (M >= M_MIN) & (M <= M_MAX)
 
     # base selection (always applied)
-    cut_base = cut_z_trk & cut_chi2_p & cut_chi2_n
+    cut_base = cut_fpga & cut_z_trk & cut_chi2_p & cut_chi2_n
 
     # road matching: optional for comparison studies
     cut_all = cut_base & cut_road if road_matching else cut_base
@@ -237,6 +245,7 @@ def process_spin(spin: str, output_path: str, reco_dir: str,
     print(f"  {'(raw dimuon candidates)':<44s} {n_raw:>7,}")
     c = np.ones(n_raw, dtype=bool)
     c = cumshow("road matching",              cut_road,   c, applied=road_matching)
+    c = cumshow("FPGA bit-0 (MATRIX1)",       cut_fpga,   c)
     c = cumshow("z_track > -600 cm",          cut_z_trk,  c)
     c = cumshow("|y_st1| > 3 cm",             c,          c, applied=False)
     c = cumshow("py_st1_pos*py_st1_neg < 0",  c,          c, applied=False)
