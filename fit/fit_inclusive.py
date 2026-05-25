@@ -36,31 +36,45 @@ ROOT.RooMsgService.instance().setGlobalKillBelow(ROOT.RooFit.WARNING)
 
 _BASE_OUTPUT = "/Users/spin/ana-spinquest-fit/fit/fit_inclusive.png"
 
-BRANCHES = [
+_BRANCHES_FULL = [
     "rec_dimu_M",
     "rec_track_pos_x_st1",
     "rec_track_neg_x_st1",
     "rec_track_pos_py_st1",
     "rec_track_neg_py_st1",
 ]
+_BRANCHES_BASE = ["rec_dimu_M"]
+
+_ST1_COLS = {"rec_track_pos_x_st1", "rec_track_neg_x_st1",
+             "rec_track_pos_py_st1", "rec_track_neg_py_st1"}
 
 
 def load_mass_array(mode: str) -> np.ndarray:
-    """Load both spin states, apply track cuts, apply mass window, return combined mass array."""
-    raw = load_spin_data(mode, BRANCHES)
+    """Load both spin states, apply track cuts (if available), return combined mass array."""
+    try:
+        raw     = load_spin_data(mode, _BRANCHES_FULL)
+        has_st1 = True
+    except Exception as exc:
+        if any(col in str(exc) for col in _ST1_COLS):
+            print(f"  WARNING: station-1 branches not found ({exc})")
+            print("  → skipping x_st1 + py_st1 cuts (base cuts only)")
+            raw     = load_spin_data(mode, _BRANCHES_BASE)
+            has_st1 = False
+        else:
+            raise
 
     chunks = []
     for spin in ("up", "down"):
-        arr    = raw[spin]
-        x_cut  = (arr["rec_track_pos_x_st1"] < 25) & (arr["rec_track_neg_x_st1"] < 25)
-        py_cut = arr["rec_track_pos_py_st1"] * arr["rec_track_neg_py_st1"] < 0
-        keep   = x_cut & py_cut
-
-        n_in  = len(arr["rec_dimu_M"])
-        n_out = int(keep.sum())
-        print(f"  [{spin}] {n_in:,} → {n_out:,} after x_st1 + py_st1 cuts")
-
-        chunks.append(arr["rec_dimu_M"][keep])
+        arr = raw[spin]
+        if has_st1:
+            x_cut  = (arr["rec_track_pos_x_st1"] < 25) & (arr["rec_track_neg_x_st1"] < 25)
+            py_cut = arr["rec_track_pos_py_st1"] * arr["rec_track_neg_py_st1"] < 0
+            keep   = x_cut & py_cut
+            n_in   = len(arr["rec_dimu_M"])
+            print(f"  [{spin}] {n_in:,} → {int(keep.sum()):,} after x_st1 + py_st1 cuts")
+            chunks.append(arr["rec_dimu_M"][keep])
+        else:
+            chunks.append(arr["rec_dimu_M"])
 
     combined = np.concatenate(chunks)
     mass_cut = (combined > MASS_MIN) & (combined < MASS_MAX)
@@ -252,14 +266,67 @@ def fit_and_save(mass_vals, output_path):
     print(f"\nSaved → {output_path}")
 
 
+def draw_mass_hist(mode: str, out_path: str) -> None:
+    """
+    Draw a simple combined (up + down) dimuon mass histogram, 0–6 GeV.
+    All events that survived the conversion cuts are shown — no mass
+    window, no spin split, no L/R split.
+    """
+    HIST_MIN, HIST_MAX, HIST_BINS = 0.0, 6.0, 120   # 0.05 GeV / bin
+
+    # Load only the mass branch — no extra cuts here
+    raw = load_spin_data(mode, ["rec_dimu_M"])
+    mass = np.concatenate([raw["up"]["rec_dimu_M"],
+                           raw["down"]["rec_dimu_M"]])
+    mass = mass[(mass >= HIST_MIN) & (mass <= HIST_MAX)]
+    print(f"  Events in histogram [{HIST_MIN}, {HIST_MAX}] GeV: {len(mass):,}")
+
+    bw = (HIST_MAX - HIST_MIN) / HIST_BINS
+
+    h = ROOT.TH1F("h_mass_all", "Dimuon mass (spin up + down, all events)",
+                  HIST_BINS, HIST_MIN, HIST_MAX)
+    h.FillN(len(mass), mass.astype(np.float64), np.ones(len(mass)))
+    h.GetXaxis().SetTitle("Dimuon mass [GeV]")
+    h.GetYaxis().SetTitle(f"Events / ({bw:.2f} GeV)")
+    h.SetLineWidth(2)
+    h.SetLineColor(ROOT.kBlue + 1)
+
+    canvas = ROOT.TCanvas("c_hist_all", "Mass histogram", 900, 700)
+    canvas.SetLeftMargin(0.13); canvas.SetRightMargin(0.05)
+    canvas.SetTopMargin(0.08);  canvas.SetBottomMargin(0.13)
+
+    ROOT.gStyle.SetOptStat("nemr")
+    h.Draw("HIST")
+    canvas.Update()
+
+    st = h.FindObject("TPaveStats")
+    if st:
+        st.SetX1NDC(0.62); st.SetX2NDC(0.93)
+        st.SetY1NDC(0.65); st.SetY2NDC(0.88)
+        st.Draw()
+
+    canvas.Update()
+    canvas.SaveAs(out_path)
+    print(f"Saved → {out_path}")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Inclusive J/ψ fit — spin up + down merged, no L/R split")
     add_data_arg(parser)
+    parser.add_argument(
+        "--hist-only", action="store_true",
+        help="Draw a raw mass histogram (0–6 GeV, all events) instead of running the fit")
     args = parser.parse_args()
 
     out = output_path(_BASE_OUTPUT, args.data)
     print(f"\n── Data mode: {args.data!r}  →  {out}")
-    print("── Loading data ──────────────────────────────────────────────")
-    mass_vals = load_mass_array(args.data)
-    fit_and_save(mass_vals, out)
+
+    if args.hist_only:
+        hist_out = out.replace(".png", "_mass_hist.png")
+        print("── Drawing mass histogram ────────────────────────────────────")
+        draw_mass_hist(args.data, hist_out)
+    else:
+        print("── Loading data ──────────────────────────────────────────────")
+        mass_vals = load_mass_array(args.data)
+        fit_and_save(mass_vals, out)

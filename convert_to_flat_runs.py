@@ -73,6 +73,11 @@ _BRANCHES = [
     "dimuon_list.chisq_target_neg",
     "dimuon_list.chisq_dump_neg",
     "dimuon_list.chisq_upstream_neg",
+    # road-matching (top/bottom detector halves per track)
+    "dimuon_list.pos_top",
+    "dimuon_list.pos_bot",
+    "dimuon_list.neg_top",
+    "dimuon_list.neg_bot",
 ]
 
 
@@ -136,10 +141,14 @@ def get_spill_files(spin: str, reco_dir: str) -> list:
 
 # ── Per-spin processing ────────────────────────────────────────────────────────
 
-def process_spin(spin: str, output_path: str, reco_dir: str) -> None:
+def process_spin(spin: str, output_path: str, reco_dir: str,
+                 road_matching: bool = False) -> None:
     """
     Read all spill files for one spin state, apply cuts, write flat tree.
     Uses uproot.concatenate to load all files in one vectorised pass.
+
+    road_matching : if True, require tracks in opposite detector halves
+                    (pos_top & neg_bot) OR (pos_bot & neg_top).
     """
     print(f"\n── Collecting spin-{spin} spill files ────────────────────────")
     files = get_spill_files(spin, reco_dir)
@@ -173,26 +182,41 @@ def process_spin(spin: str, output_path: str, reco_dir: str) -> None:
     chi2_dum_n = flat(arrays["dimuon_list.chisq_dump_neg"])
     chi2_ups_n = flat(arrays["dimuon_list.chisq_upstream_neg"])
 
+    # road-matching booleans
+    pos_top = flat(arrays["dimuon_list.pos_top"]).astype(bool)
+    pos_bot = flat(arrays["dimuon_list.pos_bot"]).astype(bool)
+    neg_top = flat(arrays["dimuon_list.neg_top"]).astype(bool)
+    neg_bot = flat(arrays["dimuon_list.neg_bot"]).astype(bool)
+
     n_raw = len(E_d)
     print(f"  Dimuon candidates (raw):             {n_raw:,}")
 
     # ── Cuts ──────────────────────────────────────────────────────────────
     # Cut 3 (|y_st1| > 3 cm) is skipped — station-1 data not in this dataset
     cut_fpga   = (fpga & 0x1) != 0
-    cut_z      = (z_vp > -600.0) & (z_vn > -600.0)
+    cut_z      = (z_vp > -690.0) & (z_vn > -690.0)
     cut_chi2_p = (chi2_tgt_p > 0) & (chi2_dum_p - chi2_tgt_p > 0) & (chi2_ups_p - chi2_tgt_p > 0)
     cut_chi2_n = (chi2_tgt_n > 0) & (chi2_dum_n - chi2_tgt_n > 0) & (chi2_ups_n - chi2_tgt_n > 0)
 
     M        = np.sqrt(np.maximum(E_d**2 - (px_d**2 + py_d**2 + pz_d**2), 0.0))
     cut_mass = (M >= M_MIN) & (M <= M_MAX)
 
+    # road matching: (pos top & neg bot) OR (pos bot & neg top)
+    cut_road = (pos_top & neg_bot) | (pos_bot & neg_top)
+
     cut_all = cut_fpga & cut_z & cut_chi2_p & cut_chi2_n
-    sel     = cut_all & cut_mass
+    if road_matching:
+        cut_all = cut_all & cut_road
+    sel = cut_all & cut_mass
 
     print(f"  After FPGA trigger:                  {int(cut_fpga.sum()):,}")
-    print(f"  After Z_vertex > -600 cm:            {int((cut_fpga & cut_z).sum()):,}")
+    print(f"  After Z_vertex > -690 cm:            {int((cut_fpga & cut_z).sum()):,}")
     print(f"  [|y_st1| > 3 cm cut skipped — st1 branches not available]")
-    print(f"  After chi2 cuts:                     {int(cut_all.sum()):,}")
+    print(f"  After chi2 cuts:                     {int((cut_fpga & cut_z & cut_chi2_p & cut_chi2_n).sum()):,}")
+    if road_matching:
+        print(f"  After road matching:                 {int(cut_all.sum()):,}")
+    else:
+        print(f"  [road matching not applied — use --road-matching to enable]")
     print(f"  After mass [{M_MIN}, {M_MAX}] GeV:   {int(sel.sum()):,}")
 
     # ── Derived kinematics ─────────────────────────────────────────────────
@@ -258,20 +282,27 @@ def main() -> None:
     parser.add_argument(
         "--reco-dir", default=RECO_DIR,
         help=f"Path to reco-YYYYMMDD directory  (default: {RECO_DIR})")
+    parser.add_argument(
+        "--road-matching", action="store_true",
+        help="Apply road-matching cut: require tracks in opposite detector halves "
+             "(pos_top & neg_bot) OR (pos_bot & neg_top).  Off by default.")
     args = parser.parse_args()
 
-    reco_dir = args.reco_dir   # plain local variable — no global mutation needed
+    reco_dir = args.reco_dir
     spins    = ["up", "down"] if args.spin == "both" else [args.spin]
 
+    # encode road-matching in the output filename so results don't collide
+    suffix = "_rm" if args.road_matching else ""
+
     for spin in spins:
-        out = os.path.join(args.outdir, f"flat_runs_{spin}.root")
-        process_spin(spin, out, reco_dir)
+        out = os.path.join(args.outdir, f"flat_runs_{spin}{suffix}.root")
+        process_spin(spin, out, reco_dir, road_matching=args.road_matching)
 
     print("\nDone.")
     if len(spins) == 2:
         print("\nNext steps — copy flat files to your analysis machine:")
-        print(f"  scp spinquestgpvm01:{args.outdir}/flat_runs_up.root   data/")
-        print(f"  scp spinquestgpvm01:{args.outdir}/flat_runs_down.root data/")
+        print(f"  scp spinquestgpvm01:{args.outdir}/flat_runs_up{suffix}.root   data/")
+        print(f"  scp spinquestgpvm01:{args.outdir}/flat_runs_down{suffix}.root data/")
 
 
 if __name__ == "__main__":
