@@ -126,37 +126,84 @@ def rapidity(E, pz):
 
 # ── File discovery ─────────────────────────────────────────────────────────────
 
-def get_spill_files(spin: str, reco_dir: str) -> list:
-    """Return sorted list of output_PM.root paths for the given spin state."""
+_DEFAULT_SPILL_LIST = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "list_run_spill.txt.Phys")
+
+
+def load_valid_spills(path: str) -> set:
+    """
+    Read a two-column spill-quality file (run  spill) and return the set of
+    valid (run, spill) integer pairs.  Lines starting with '#' are ignored.
+    """
+    valid = set()
+    with open(path) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            if len(parts) >= 2:
+                valid.add((int(parts[0]), int(parts[1])))
+    return valid
+
+
+def get_spill_files(spin: str, reco_dir: str,
+                    valid_spills: set | None = None) -> list:
+    """
+    Return sorted list of output_PM.root paths for the given spin state.
+    If valid_spills is provided, only spills in that set are included.
+    """
     run_nums = SPIN_UP_RUNS if spin == "up" else SPIN_DOWN_RUNS
     files = []
     for run_num in sorted(run_nums):
         run_dir = os.path.join(reco_dir, f"run_{run_num:06d}")
         pattern = os.path.join(run_dir, "spill_*", "out", "output_PM.root")
         matched = sorted(glob.glob(pattern))
-        n = len(matched)
-        if n == 0:
-            print(f"  WARNING: run {run_num:06d} — no spill files found")
-            print(f"           (looked for: {pattern})")
+
+        if valid_spills is not None:
+            kept = []
+            for fpath in matched:
+                # path: .../spill_YYYYYYYYY/out/output_PM.root
+                spill_dir = os.path.basename(
+                    os.path.dirname(os.path.dirname(fpath)))  # "spill_YYYYYYYYY"
+                spill_id  = int(spill_dir.split("_", 1)[1])
+                if (run_num, spill_id) in valid_spills:
+                    kept.append(fpath)
+            n_all, n_kept = len(matched), len(kept)
+            if n_all == 0:
+                print(f"  WARNING: run {run_num:06d} — no spill files found on disk")
+            elif n_kept == 0:
+                print(f"  WARNING: run {run_num:06d} — 0/{n_all} spills pass quality list")
+            else:
+                print(f"  run {run_num:06d}: {n_kept:3d}/{n_all:3d} spills (quality-filtered)")
+            files.extend(kept)
         else:
-            print(f"  run {run_num:06d}: {n:3d} spill files")
-        files.extend(matched)
+            n = len(matched)
+            if n == 0:
+                print(f"  WARNING: run {run_num:06d} — no spill files found")
+                print(f"           (looked for: {pattern})")
+            else:
+                print(f"  run {run_num:06d}: {n:3d} spill files")
+            files.extend(matched)
     return files
 
 
 # ── Per-spin processing ────────────────────────────────────────────────────────
 
 def process_spin(spin: str, output_path: str, reco_dir: str,
-                 road_matching: bool = False) -> None:
+                 road_matching: bool = False,
+                 valid_spills: set | None = None) -> None:
     """
     Read all spill files for one spin state, apply cuts, write flat tree.
     Uses uproot.concatenate to load all files in one vectorised pass.
 
     road_matching : if True, require tracks in opposite detector halves
                     (pos_top & neg_bot) OR (pos_bot & neg_top).
+    valid_spills  : set of (run, spill) int pairs from list_run_spill.txt.Phys;
+                    if None, all spills on disk are used.
     """
     print(f"\n── Collecting spin-{spin} spill files ────────────────────────")
-    files = get_spill_files(spin, reco_dir)
+    files = get_spill_files(spin, reco_dir, valid_spills=valid_spills)
     if not files:
         raise RuntimeError(
             f"No spill files found for spin={spin!r} under {reco_dir!r}")
@@ -324,17 +371,34 @@ def main() -> None:
         "--road-matching", action="store_true",
         help="Apply road-matching cut: require tracks in opposite detector halves "
              "(pos_top & neg_bot) OR (pos_bot & neg_top).  Off by default.")
+    parser.add_argument(
+        "--spill-list", default=_DEFAULT_SPILL_LIST,
+        metavar="FILE",
+        help="Two-column file of valid (run, spill) pairs  "
+             f"(default: {_DEFAULT_SPILL_LIST}). "
+             "Pass '--spill-list none' to skip filtering.")
     args = parser.parse_args()
 
     reco_dir = args.reco_dir
     spins    = ["up", "down"] if args.spin == "both" else [args.spin]
+
+    # load valid spill list
+    if args.spill_list.lower() == "none":
+        valid_spills = None
+        print("── Spill quality filter: DISABLED (using all spills on disk)")
+    else:
+        valid_spills = load_valid_spills(args.spill_list)
+        print(f"── Spill quality filter: {len(valid_spills):,} valid (run,spill) pairs"
+              f" from {os.path.basename(args.spill_list)}")
 
     # encode road-matching in the output filename so results don't collide
     suffix = "_rm" if args.road_matching else ""
 
     for spin in spins:
         out = os.path.join(args.outdir, f"flat_runs_{spin}{suffix}.root")
-        process_spin(spin, out, reco_dir, road_matching=args.road_matching)
+        process_spin(spin, out, reco_dir,
+                     road_matching=args.road_matching,
+                     valid_spills=valid_spills)
 
     print("\nDone.")
     if len(spins) == 2:
