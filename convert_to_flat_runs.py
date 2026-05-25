@@ -13,12 +13,16 @@ convert_to_flat_runs.py
     UP  : runs 6111–6118, 6156
     DOWN: runs 6135–6139, 6149–6155
 
-  Cuts applied (same as convert_to_flat_uproot.py / AnaDimuon.cc):
-    1. FPGA bit-0 (MATRIX1) trigger
-    2. Both track vertex z > -600 cm
-    3. |y_st1| > 3 cm for both tracks at station 1
-    4. chi2_tgt > 0, chi2_dump − chi2_tgt > 0, chi2_ups − chi2_tgt > 0 (pos & neg)
-    5. Dimuon invariant mass: 0.5 ≤ M ≤ 10.0 GeV
+  Cuts applied — Cut #1 (DocDB #11359 / Liliet):
+    1. z_track > -600 cm  (both track vertices)
+    2. |y_st1| > 3 cm  — SKIPPED (station-1 branches absent in reco-20260512)
+    3. chi2_tgt > 0, chi2_dump − chi2_tgt > 0, chi2_ups − chi2_tgt > 0 (pos & neg)
+    4. py_st1_pos * py_st1_neg < 0  — SKIPPED (st1 absent)
+    5. x_st1_pos < 25 cm, x_st1_neg < 25 cm  — SKIPPED (st1 absent)
+    6. Dimuon invariant mass: M_MIN ≤ M ≤ 10.0 GeV
+
+  Optional (--road-matching flag):
+    Road matching: (pos_top & neg_bot) OR (pos_bot & neg_top)
 
   Output (written to --outdir, default ./data/):
     flat_runs_up.root
@@ -189,28 +193,24 @@ def process_spin(spin: str, output_path: str, reco_dir: str,
     n_raw = len(E_d)
     print(f"  Dimuon candidates (raw):             {n_raw:,}")
 
-    # ── Cuts (DocDB #11457) ────────────────────────────────────────────────
-    # Road matching: (pos top & neg bot) OR (pos bot & neg top)
-    cut_road   = (pos_top & neg_bot) | (pos_bot & neg_top)
+    # ── Cuts — Cut #1 (DocDB #11359 / Liliet) ─────────────────────────────
+    # Road matching: optional (--road-matching flag)
+    cut_road  = (pos_top & neg_bot) | (pos_bot & neg_top)
 
-    # z_track > -690 cm  (both individual track vertices)
-    cut_z_trk  = (z_vp  > -690.0) & (z_vn  > -690.0)
+    # 1. z_track > -600 cm  (both individual track vertices)
+    cut_z_trk = (z_vp > -600.0) & (z_vn > -600.0)
 
-    # z_dimuon > -690 cm  (dimuon combined vertex)
-    cut_z_dimu = z_dimu > -690.0
+    # 2. |y_st1| > 3 cm — SKIPPED (station-1 branches absent in reco-20260512)
+    # 4. py_st1_pos * py_st1_neg < 0 — SKIPPED (st1 absent)
+    # 5. x_st1_pos < 25 cm, x_st1_neg < 25 cm — SKIPPED (st1 absent)
 
-    # p_z^track > 5 GeV  (longitudinal momentum of each muon)
-    cut_pz     = (pz_p  >  5.0)   & (pz_n  >  5.0)
-
-    # |y_st1| > 3 cm — SKIPPED (station-1 branches absent in reco-20260512)
-
-    # chi2: all three > 0, plus difference cuts  (pos & neg muons)
+    # 3. chi2: tgt > 0 + difference cuts  (pos & neg muons)
     cut_chi2_p = (
-        (chi2_tgt_p > 0) & (chi2_dum_p > 0) & (chi2_ups_p > 0) &
+        (chi2_tgt_p > 0) &
         (chi2_dum_p - chi2_tgt_p > 0) & (chi2_ups_p - chi2_tgt_p > 0)
     )
     cut_chi2_n = (
-        (chi2_tgt_n > 0) & (chi2_dum_n > 0) & (chi2_ups_n > 0) &
+        (chi2_tgt_n > 0) &
         (chi2_dum_n - chi2_tgt_n > 0) & (chi2_ups_n - chi2_tgt_n > 0)
     )
 
@@ -218,9 +218,9 @@ def process_spin(spin: str, output_path: str, reco_dir: str,
     cut_mass = (M >= M_MIN) & (M <= M_MAX)
 
     # base selection (always applied)
-    cut_base = cut_z_trk & cut_z_dimu & cut_pz & cut_chi2_p & cut_chi2_n
+    cut_base = cut_z_trk & cut_chi2_p & cut_chi2_n
 
-    # road matching: standard cut, but kept optional for comparison studies
+    # road matching: optional for comparison studies
     cut_all = cut_base & cut_road if road_matching else cut_base
     sel     = cut_all & cut_mass
 
@@ -237,10 +237,10 @@ def process_spin(spin: str, output_path: str, reco_dir: str,
     print(f"  {'(raw dimuon candidates)':<44s} {n_raw:>7,}")
     c = np.ones(n_raw, dtype=bool)
     c = cumshow("road matching",              cut_road,   c, applied=road_matching)
-    c = cumshow("z_track > -690 cm",          cut_z_trk,  c)
-    c = cumshow("z_dimuon > -690 cm",         cut_z_dimu, c)
-    c = cumshow("p_z^track > 5 GeV",          cut_pz,     c)
+    c = cumshow("z_track > -600 cm",          cut_z_trk,  c)
     c = cumshow("|y_st1| > 3 cm",             c,          c, applied=False)
+    c = cumshow("py_st1_pos*py_st1_neg < 0",  c,          c, applied=False)
+    c = cumshow("x_st1 < 25 cm",              c,          c, applied=False)
     c = cumshow("chi2 cuts (pos muon)",        cut_chi2_p, c)
     c = cumshow("chi2 cuts (neg muon)",        cut_chi2_n, c)
     c = cumshow(f"mass in [{M_MIN}, {M_MAX}] GeV", cut_mass, c)
@@ -282,6 +282,7 @@ def process_spin(spin: str, output_path: str, reco_dir: str,
         "rec_mu_dpt":           (pT_p - pT_n)[sel],
         "rec_mu_Epos":          E_p[sel],
         "rec_mu_Eneg":          E_n[sel],
+        "rec_dimu_z_vtx":       z_dimu[sel],
         "rec_dz_vtx":           (z_vp - z_vn)[sel],
         "rec_mu_deltaR":        np.sqrt((eta_p - eta_n)**2 + dphi**2)[sel],
     }
