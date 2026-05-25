@@ -42,6 +42,7 @@ Then copy back to your analysis machine:
 import argparse
 import glob
 import os
+from typing import Optional
 
 import awkward as ak
 import numpy as np
@@ -148,7 +149,7 @@ def load_valid_spills(path: str) -> set:
 
 
 def get_spill_files(spin: str, reco_dir: str,
-                    valid_spills: set | None = None) -> list:
+                    valid_spills: Optional[set] = None) -> list:
     """
     Return sorted list of output_PM.root paths for the given spin state.
     If valid_spills is provided, only spills in that set are included.
@@ -192,7 +193,7 @@ def get_spill_files(spin: str, reco_dir: str,
 
 def process_spin(spin: str, output_path: str, reco_dir: str,
                  road_matching: bool = False,
-                 valid_spills: set | None = None) -> None:
+                 valid_spills: Optional[set] = None) -> None:
     """
     Read all spill files for one spin state, apply cuts, write flat tree.
     Uses uproot.concatenate to load all files in one vectorised pass.
