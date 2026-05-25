@@ -52,7 +52,7 @@ SPIN_DOWN_RUNS = {6135, 6136, 6137, 6138, 6139,
                   6149, 6150, 6151, 6152, 6153, 6154, 6155}
 
 # ── Cut thresholds ─────────────────────────────────────────────────────────────
-M_MIN, M_MAX = 0.5, 10.0
+M_MIN, M_MAX = 0.0, 10.0
 
 # ── Branches to read ──────────────────────────────────────────────────────────
 # NOTE: in the reco-20260512 files the tree layout differs from output_PM_up/down.root:
@@ -224,17 +224,28 @@ def process_spin(spin: str, output_path: str, reco_dir: str,
     cut_all = cut_base & cut_road if road_matching else cut_base
     sel     = cut_all & cut_mass
 
-    # ── Cut-flow ───────────────────────────────────────────────────────────
-    print(f"  After road matching:                 {int((cut_road).sum()):,}"
-          + ("" if road_matching else "  [not applied — use --road-matching]"))
-    print(f"  After z_track > -690 cm:             {int(cut_z_trk.sum()):,}")
-    print(f"  After z_dimuon > -690 cm:            {int((cut_z_trk & cut_z_dimu).sum()):,}")
-    print(f"  After p_z^track > 5 GeV:             {int((cut_z_trk & cut_z_dimu & cut_pz).sum()):,}")
-    print(f"  [|y_st1| > 3 cm skipped — st1 branches not available]")
-    print(f"  After chi2 cuts:                     {int(cut_base.sum()):,}")
-    if road_matching:
-        print(f"  After road matching:                 {int(cut_all.sum()):,}")
-    print(f"  After mass [{M_MIN}, {M_MAX}] GeV:   {int(sel.sum()):,}")
+    # ── Detailed cut-flow (cumulative, one cut at a time) ─────────────────
+    def cumshow(label, mask, c_in, applied=True):
+        c_out = (c_in & mask) if applied else c_in
+        tag   = "" if applied else "  [NOT APPLIED]"
+        removed = int(c_in.sum()) - int(c_out.sum())
+        print(f"  {label:<44s} {int(c_out.sum()):>7,}  (-{removed:,}){tag}")
+        return c_out
+
+    print(f"\n  {'cut':<44s} {'surviving':>7}  removed")
+    print(f"  {'-'*65}")
+    print(f"  {'(raw dimuon candidates)':<44s} {n_raw:>7,}")
+    c = np.ones(n_raw, dtype=bool)
+    c = cumshow("road matching",              cut_road,   c, applied=road_matching)
+    c = cumshow("z_track > -690 cm",          cut_z_trk,  c)
+    c = cumshow("z_dimuon > -690 cm",         cut_z_dimu, c)
+    c = cumshow("p_z^track > 5 GeV",          cut_pz,     c)
+    c = cumshow("|y_st1| > 3 cm",             c,          c, applied=False)
+    c = cumshow("chi2 cuts (pos muon)",        cut_chi2_p, c)
+    c = cumshow("chi2 cuts (neg muon)",        cut_chi2_n, c)
+    c = cumshow(f"mass in [{M_MIN}, {M_MAX}] GeV", cut_mass, c)
+    print(f"  {'-'*65}")
+    print(f"  {'FINAL selected':<44s} {int(sel.sum()):>7,}")
 
     # ── Derived kinematics ─────────────────────────────────────────────────
     pT_d = np.sqrt(px_d**2 + py_d**2)
