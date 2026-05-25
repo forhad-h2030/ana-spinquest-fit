@@ -61,12 +61,13 @@ M_MIN, M_MAX = 0.5, 10.0
 #     are NOT present → the |y_st1|>3 cm cut is skipped during conversion,
 #     and fit_mode_final's x_st1/py_st1 cuts are not available for this dataset.
 _BRANCHES = [
-    "fpga_bits",                          # event-level, flat (not "event/fpga_bits")
+    "fpga_bits",                          # read but not used in current selection
     "dimuon_list.mom_target",
-    "dimuon_list.mom_pos",
-    "dimuon_list.mom_neg",
-    "dimuon_list.pos_pos",                # vertex position of positive track
-    "dimuon_list.pos_neg",                # vertex position of negative track
+    "dimuon_list.mom_pos",                # positive muon 4-momentum (→ pz_pos)
+    "dimuon_list.mom_neg",                # negative muon 4-momentum (→ pz_neg)
+    "dimuon_list.pos",                    # dimuon vertex position   (→ z_dimuon)
+    "dimuon_list.pos_pos",                # positive track vertex    (→ z_track_pos)
+    "dimuon_list.pos_neg",                # negative track vertex    (→ z_track_neg)
     "dimuon_list.chisq_target_pos",
     "dimuon_list.chisq_dump_pos",
     "dimuon_list.chisq_upstream_pos",
@@ -163,17 +164,14 @@ def process_spin(spin: str, output_path: str, reco_dir: str,
     print(f"\n── Reading & concatenating {len(files)} files … (may take a while)")
     arrays = uproot.concatenate(sources, expressions=_BRANCHES, library="ak")
 
-    # ── Broadcast FPGA bits (event-level flat branch) to per-dimuon ──────
-    fpga = broadcast_event_to_dimuons(
-        arrays["fpga_bits"], arrays["dimuon_list.mom_target"])
-
     # ── Flatten all dimuon-level vector branches ───────────────────────────
     px_d, py_d, pz_d, E_d = flat_lv(arrays["dimuon_list.mom_target"])
     px_p, py_p, pz_p, E_p = flat_lv(arrays["dimuon_list.mom_pos"])
     px_n, py_n, pz_n, E_n = flat_lv(arrays["dimuon_list.mom_neg"])
-    _,    _,    z_vp       = flat_v3(arrays["dimuon_list.pos_pos"])
-    _,    _,    z_vn       = flat_v3(arrays["dimuon_list.pos_neg"])
-    # NOTE: station-1 branches not present in reco-20260512 → y_st1 cut skipped
+    _,    _,    z_dimu     = flat_v3(arrays["dimuon_list.pos"])      # dimuon vertex z
+    _,    _,    z_vp       = flat_v3(arrays["dimuon_list.pos_pos"])  # track vertex z (pos)
+    _,    _,    z_vn       = flat_v3(arrays["dimuon_list.pos_neg"])  # track vertex z (neg)
+    # NOTE: station-1 branches not present in reco-20260512 → |y_st1|>3 cm skipped
 
     chi2_tgt_p = flat(arrays["dimuon_list.chisq_target_pos"])
     chi2_dum_p = flat(arrays["dimuon_list.chisq_dump_pos"])
@@ -191,32 +189,51 @@ def process_spin(spin: str, output_path: str, reco_dir: str,
     n_raw = len(E_d)
     print(f"  Dimuon candidates (raw):             {n_raw:,}")
 
-    # ── Cuts ──────────────────────────────────────────────────────────────
-    # Cut 3 (|y_st1| > 3 cm) is skipped — station-1 data not in this dataset
-    cut_fpga   = (fpga & 0x1) != 0
-    cut_z      = (z_vp > -690.0) & (z_vn > -690.0)
-    cut_chi2_p = (chi2_tgt_p > 0) & (chi2_dum_p - chi2_tgt_p > 0) & (chi2_ups_p - chi2_tgt_p > 0)
-    cut_chi2_n = (chi2_tgt_n > 0) & (chi2_dum_n - chi2_tgt_n > 0) & (chi2_ups_n - chi2_tgt_n > 0)
+    # ── Cuts (DocDB #11457) ────────────────────────────────────────────────
+    # Road matching: (pos top & neg bot) OR (pos bot & neg top)
+    cut_road   = (pos_top & neg_bot) | (pos_bot & neg_top)
+
+    # z_track > -690 cm  (both individual track vertices)
+    cut_z_trk  = (z_vp  > -690.0) & (z_vn  > -690.0)
+
+    # z_dimuon > -690 cm  (dimuon combined vertex)
+    cut_z_dimu = z_dimu > -690.0
+
+    # p_z^track > 5 GeV  (longitudinal momentum of each muon)
+    cut_pz     = (pz_p  >  5.0)   & (pz_n  >  5.0)
+
+    # |y_st1| > 3 cm — SKIPPED (station-1 branches absent in reco-20260512)
+
+    # chi2: all three > 0, plus difference cuts  (pos & neg muons)
+    cut_chi2_p = (
+        (chi2_tgt_p > 0) & (chi2_dum_p > 0) & (chi2_ups_p > 0) &
+        (chi2_dum_p - chi2_tgt_p > 0) & (chi2_ups_p - chi2_tgt_p > 0)
+    )
+    cut_chi2_n = (
+        (chi2_tgt_n > 0) & (chi2_dum_n > 0) & (chi2_ups_n > 0) &
+        (chi2_dum_n - chi2_tgt_n > 0) & (chi2_ups_n - chi2_tgt_n > 0)
+    )
 
     M        = np.sqrt(np.maximum(E_d**2 - (px_d**2 + py_d**2 + pz_d**2), 0.0))
     cut_mass = (M >= M_MIN) & (M <= M_MAX)
 
-    # road matching: (pos top & neg bot) OR (pos bot & neg top)
-    cut_road = (pos_top & neg_bot) | (pos_bot & neg_top)
+    # base selection (always applied)
+    cut_base = cut_z_trk & cut_z_dimu & cut_pz & cut_chi2_p & cut_chi2_n
 
-    cut_all = cut_fpga & cut_z & cut_chi2_p & cut_chi2_n
-    if road_matching:
-        cut_all = cut_all & cut_road
-    sel = cut_all & cut_mass
+    # road matching: standard cut, but kept optional for comparison studies
+    cut_all = cut_base & cut_road if road_matching else cut_base
+    sel     = cut_all & cut_mass
 
-    print(f"  After FPGA trigger:                  {int(cut_fpga.sum()):,}")
-    print(f"  After Z_vertex > -690 cm:            {int((cut_fpga & cut_z).sum()):,}")
-    print(f"  [|y_st1| > 3 cm cut skipped — st1 branches not available]")
-    print(f"  After chi2 cuts:                     {int((cut_fpga & cut_z & cut_chi2_p & cut_chi2_n).sum()):,}")
+    # ── Cut-flow ───────────────────────────────────────────────────────────
+    print(f"  After road matching:                 {int((cut_road).sum()):,}"
+          + ("" if road_matching else "  [not applied — use --road-matching]"))
+    print(f"  After z_track > -690 cm:             {int(cut_z_trk.sum()):,}")
+    print(f"  After z_dimuon > -690 cm:            {int((cut_z_trk & cut_z_dimu).sum()):,}")
+    print(f"  After p_z^track > 5 GeV:             {int((cut_z_trk & cut_z_dimu & cut_pz).sum()):,}")
+    print(f"  [|y_st1| > 3 cm skipped — st1 branches not available]")
+    print(f"  After chi2 cuts:                     {int(cut_base.sum()):,}")
     if road_matching:
         print(f"  After road matching:                 {int(cut_all.sum()):,}")
-    else:
-        print(f"  [road matching not applied — use --road-matching to enable]")
     print(f"  After mass [{M_MIN}, {M_MAX}] GeV:   {int(sel.sum()):,}")
 
     # ── Derived kinematics ─────────────────────────────────────────────────
