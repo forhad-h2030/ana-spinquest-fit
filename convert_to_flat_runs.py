@@ -54,18 +54,19 @@ SPIN_DOWN_RUNS = {6135, 6136, 6137, 6138, 6139,
 # ── Cut thresholds ─────────────────────────────────────────────────────────────
 M_MIN, M_MAX = 0.5, 10.0
 
-# ── Branches to read (same keys as convert_to_flat_uproot.py) ─────────────────
+# ── Branches to read ──────────────────────────────────────────────────────────
+# NOTE: in the reco-20260512 files the tree layout differs from output_PM_up/down.root:
+#   - fpga_bits is a flat top-level branch (not nested under "event/")
+#   - station-1 branches (pos_pos_st1, pos_neg_st1, mom_pos_st1, mom_neg_st1)
+#     are NOT present → the |y_st1|>3 cm cut is skipped during conversion,
+#     and fit_mode_final's x_st1/py_st1 cuts are not available for this dataset.
 _BRANCHES = [
-    "event/fpga_bits",
+    "fpga_bits",                          # event-level, flat (not "event/fpga_bits")
     "dimuon_list.mom_target",
     "dimuon_list.mom_pos",
     "dimuon_list.mom_neg",
-    "dimuon_list.pos_pos",
-    "dimuon_list.pos_neg",
-    "dimuon_list.pos_pos_st1",
-    "dimuon_list.pos_neg_st1",
-    "dimuon_list.mom_pos_st1",
-    "dimuon_list.mom_neg_st1",
+    "dimuon_list.pos_pos",                # vertex position of positive track
+    "dimuon_list.pos_neg",                # vertex position of negative track
     "dimuon_list.chisq_target_pos",
     "dimuon_list.chisq_dump_pos",
     "dimuon_list.chisq_upstream_pos",
@@ -153,9 +154,9 @@ def process_spin(spin: str, output_path: str, reco_dir: str) -> None:
     print(f"\n── Reading & concatenating {len(files)} files … (may take a while)")
     arrays = uproot.concatenate(sources, expressions=_BRANCHES, library="ak")
 
-    # ── Broadcast FPGA bits (event-level) to per-dimuon ───────────────────
+    # ── Broadcast FPGA bits (event-level flat branch) to per-dimuon ──────
     fpga = broadcast_event_to_dimuons(
-        arrays["event/fpga_bits"], arrays["dimuon_list.mom_target"])
+        arrays["fpga_bits"], arrays["dimuon_list.mom_target"])
 
     # ── Flatten all dimuon-level vector branches ───────────────────────────
     px_d, py_d, pz_d, E_d = flat_lv(arrays["dimuon_list.mom_target"])
@@ -163,10 +164,7 @@ def process_spin(spin: str, output_path: str, reco_dir: str) -> None:
     px_n, py_n, pz_n, E_n = flat_lv(arrays["dimuon_list.mom_neg"])
     _,    _,    z_vp       = flat_v3(arrays["dimuon_list.pos_pos"])
     _,    _,    z_vn       = flat_v3(arrays["dimuon_list.pos_neg"])
-    x_st1_p, y_st1_p, _   = flat_v3(arrays["dimuon_list.pos_pos_st1"])
-    x_st1_n, y_st1_n, _   = flat_v3(arrays["dimuon_list.pos_neg_st1"])
-    px_st1_p, py_st1_p, _, _ = flat_lv(arrays["dimuon_list.mom_pos_st1"])
-    px_st1_n, py_st1_n, _, _ = flat_lv(arrays["dimuon_list.mom_neg_st1"])
+    # NOTE: station-1 branches not present in reco-20260512 → y_st1 cut skipped
 
     chi2_tgt_p = flat(arrays["dimuon_list.chisq_target_pos"])
     chi2_dum_p = flat(arrays["dimuon_list.chisq_dump_pos"])
@@ -179,21 +177,21 @@ def process_spin(spin: str, output_path: str, reco_dir: str) -> None:
     print(f"  Dimuon candidates (raw):             {n_raw:,}")
 
     # ── Cuts ──────────────────────────────────────────────────────────────
-    cut_fpga  = (fpga & 0x1) != 0
-    cut_z     = (z_vp > -600.0) & (z_vn > -600.0)
-    cut_y_st1 = (np.abs(y_st1_p) > 3.0) & (np.abs(y_st1_n) > 3.0)
+    # Cut 3 (|y_st1| > 3 cm) is skipped — station-1 data not in this dataset
+    cut_fpga   = (fpga & 0x1) != 0
+    cut_z      = (z_vp > -600.0) & (z_vn > -600.0)
     cut_chi2_p = (chi2_tgt_p > 0) & (chi2_dum_p - chi2_tgt_p > 0) & (chi2_ups_p - chi2_tgt_p > 0)
     cut_chi2_n = (chi2_tgt_n > 0) & (chi2_dum_n - chi2_tgt_n > 0) & (chi2_ups_n - chi2_tgt_n > 0)
 
-    M    = np.sqrt(np.maximum(E_d**2 - (px_d**2 + py_d**2 + pz_d**2), 0.0))
+    M        = np.sqrt(np.maximum(E_d**2 - (px_d**2 + py_d**2 + pz_d**2), 0.0))
     cut_mass = (M >= M_MIN) & (M <= M_MAX)
 
-    cut_all = cut_fpga & cut_z & cut_y_st1 & cut_chi2_p & cut_chi2_n
+    cut_all = cut_fpga & cut_z & cut_chi2_p & cut_chi2_n
     sel     = cut_all & cut_mass
 
     print(f"  After FPGA trigger:                  {int(cut_fpga.sum()):,}")
     print(f"  After Z_vertex > -600 cm:            {int((cut_fpga & cut_z).sum()):,}")
-    print(f"  After |y_st1| > 3 cm:               {int((cut_fpga & cut_z & cut_y_st1).sum()):,}")
+    print(f"  [|y_st1| > 3 cm cut skipped — st1 branches not available]")
     print(f"  After chi2 cuts:                     {int(cut_all.sum()):,}")
     print(f"  After mass [{M_MIN}, {M_MAX}] GeV:   {int(sel.sum()):,}")
 
@@ -214,6 +212,9 @@ def process_spin(spin: str, output_path: str, reco_dir: str) -> None:
     eta_n = pseudorapidity(px_n, py_n, pz_n)
 
     # ── Write output ──────────────────────────────────────────────────────
+    # NOTE: rec_track_*_st1 columns are omitted — station-1 data not available
+    # in reco-20260512. fit_mode_final's x_st1/py_st1 quality cuts are therefore
+    # not applied when using --data runs; use fit_mode_bkg for base-cut fits.
     out = {
         "rec_dimu_y":           rapidity(E_d, pz_d)[sel],
         "rec_dimu_eta":         pseudorapidity(px_d, py_d, pz_d)[sel],
@@ -229,12 +230,6 @@ def process_spin(spin: str, output_path: str, reco_dir: str) -> None:
         "rec_mu_dpt":           (pT_p - pT_n)[sel],
         "rec_mu_Epos":          E_p[sel],
         "rec_mu_Eneg":          E_n[sel],
-        "rec_track_pos_x_st1":  x_st1_p[sel],
-        "rec_track_neg_x_st1":  x_st1_n[sel],
-        "rec_track_pos_px_st1": px_st1_p[sel],
-        "rec_track_neg_px_st1": px_st1_n[sel],
-        "rec_track_pos_py_st1": py_st1_p[sel],
-        "rec_track_neg_py_st1": py_st1_n[sel],
         "rec_dz_vtx":           (z_vp - z_vn)[sel],
         "rec_mu_deltaR":        np.sqrt((eta_p - eta_n)**2 + dphi**2)[sel],
     }
